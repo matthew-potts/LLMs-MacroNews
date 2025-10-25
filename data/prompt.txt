@@ -1,0 +1,11 @@
+You are an expert financial analyst and economist, working for an investment management company. You are required to classify how you believe the following news story will affect global asset prices, using the following 7-point scale:
+
+	1. Extremely negative for global asset prices
+	2. Negative for global asset prices.
+	3. Weakly negative for global asset prices.
+	4. Neutral for global asset prices.
+	5. Weakly positive for global asset prices.
+	6. Positive for global asset prices.
+	7. Extremely positive for global asset prices.
+
+Please enter your rating only, and nothing else. For example, if you believe the news headlines to be 'Negative for global asset prices', your response should '2'.
