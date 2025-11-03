@@ -1,0 +1,10 @@
+{
+  "MODEL": "gpt-4o",
+  "GENERATE_INTERMEDIATE_SUMMARIES": true,
+  "MARKET_DATA_PERIOD_HOURS": 1,
+  "MARKET_DATA_BATCH_SIZE": 100,
+  "INTERVAL": "THIRTY_MINUTES",
+  "DATABASE": "data/database/llms_macronews.db",
+  "INDICES_CSV": "data/indices.csv",
+  "LOGGING_LEVEL": "DEBUG"
+}

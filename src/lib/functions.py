@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.logging.logger import get_logger
 import sqlite3
+import threading
 from xmlrpc import client
 import lseg.data as ld
 from lseg.data.content import news, historical_pricing
@@ -16,22 +16,23 @@ from datetime import datetime
 import json
 import os
 from anthropic import Anthropic
-import threading
 from src.lib.llm_client import LLMClient
+from src.logging.logger import logger
+
+log = logger(__name__)
+
 pd.options.display.max_colwidth = 100
 pd.set_option('future.no_silent_downcasting', True)
 
-log = get_logger(__name__)
-
 def print_start(func):
-    def wrapper(*args, **kwargs):
+    def print_start(*args, **kwargs):
         log.info(f"Starting: {func.__name__}")
         return func(*args, **kwargs)
-    wrapper.__name__ = func.__name__
-    wrapper.__doc__ = func.__doc__
-    return wrapper
+    print_start.__name__ = func.__name__
+    print_start.__doc__ = func.__doc__
+    return print_start
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "config.json")
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.json")
 with open(_CONFIG_PATH, "r") as _cfg_f:
     _CFG = json.load(_cfg_f)
 
@@ -45,54 +46,52 @@ elif _INTERVAL == "ONE_HOUR":
 
 @print_start
 def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Connection) -> pd.DataFrame:
-    response = news.headlines.Definition(
+    topic = news.headlines.Definition(
         query="Fed",
         date_from=start,
         date_to=end, 
         count=count
-    ).get_data()
-    fed = response.data.df
+    ).get_data().data.df
+
+    topic['timestamp'] = topic.index
 
     topnews = news.headlines.Definition(
         query="TOPNWS",
         date_from=start,
         date_to=end,
         count=count
-    ).get_data().data
+    ).get_data().data.df
+    important_topic = pd.merge(topic[['headline', 'storyId', 'timestamp']], topnews[['storyId']], on="storyId")
 
-    important_fd = pd.merge(fed, topnews.df, on="storyId")
-    important_fd = important_fd[important_fd['headline_x'].str.isupper()]
+    
+    # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive   
+    important_topic = important_topic[important_topic['headline'].str.isupper()]
+    important_topic = important_topic[
+        (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
+        (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
+    ]
 
-    print(f'Found {len(important_fd)} important stories between {start} and {end}.')
+    important_topic.set_index('timestamp', inplace=True)
 
-    timestamps = []
+    log.info(f'Found {len(important_topic)} important stories between {start} and {end}.')
+
     bodies = []
-    valid_idx = []
 
-    for idx, story_id in important_fd['storyId'].items():
+    for idx, story_id in important_topic['storyId'].items():
         response = news.story.Definition(story_id=story_id).get_data()
         if response is None:
             continue
         try:
-            ts = response.data.raw['newsItem']['itemMeta']['versionCreated']['$']
+            #ts = response.data.raw['newsItem']['itemMeta']['versionCreated']['$']
             body = response.data.raw['newsItem']['contentSet']['inlineData'][0]['$']
+            log.debug(f'Fetched storyId {story_id}.')
         except Exception:
             continue
 
-        timestamps.append(ts)
         bodies.append(body)
-        valid_idx.append(idx)
 
-    important_fd = important_fd.loc[valid_idx].reset_index(drop=True)
-    important_fd['timestamp'] = pd.to_datetime(timestamps)
-    important_fd['body'] = bodies
-    df_stories = important_fd[['headline_x', 'storyId', 'timestamp', 'body']]
-
-    # Only grab the stories between 9am and 5pm inclusive
-    df_stories = df_stories[
-        (df_stories['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
-        (df_stories['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
-    ]
+    important_topic['body'] = bodies
+    df_stories = important_topic[['headline', 'storyId', 'body']].drop_duplicates()
 
     mark_job_completed("get_data", run_id, conn)
     
@@ -118,15 +117,14 @@ def get_indices(countries: List[str]) -> pd.DataFrame:
 
 def get_market_data_by_index(index: str, timestamp: pd.Timestamp) -> pd.DataFrame:
 
-    pid = os.getpid()
-    thread_name = threading.current_thread().name
-    log.debug(f"[PID {pid} | Thread {thread_name}] Fetching {index} at {timestamp}")
-    
+    log.debug(f"Fetching market data for index {index} at {timestamp}. PID: {os.getpid()}; Thread: {threading.current_thread().name}")
     definition = historical_pricing.summaries.Definition(
         index,
         start=timestamp,
-        end=timestamp + timedelta(hours=_MARKET_DATA_PERIOD_HOURS))
+        end=timestamp + timedelta(hours=_MARKET_DATA_PERIOD_HOURS),
+        interval = _INTERVAL)
     response = definition.get_data().data.df
+    log.debug(f"Market data fetched for index {index} at {timestamp}. PID: {os.getpid()}. Returned {len(response)} rows.")
     _raise_if_rate_limited(response)
     return response
 
@@ -180,7 +178,9 @@ def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, out
                     batch_df.to_csv(output_csv, mode='a', header=False, index=False)
                 raise
             except Exception as e:
-                log.warning(f"Error processing index {idx}: {e}")
+                import traceback
+                log.error(f"Error processing index {idx}: {e}")
+                log.error(traceback.format_exc())
                 market_data[idx] = pd.DataFrame()
     
     # Write any remaining rows
@@ -204,20 +204,24 @@ def generate_ratings(run_id: str, df: pd.DataFrame, client: LLMClient, prompt: s
         try:
             if _GENERATE_INTERMEDIATE_SUMMARIES:
                 client.instructions = f"You are an expert financial analyst. Summarize the following news article in a concise manner, maximum 3 sentences:\n\n{row['body']}\n\nSummary:"
+                log.debug(f'Generating intermediate summary for storyId {row["storyId"]}.')
                 intermediate_response = client.get_response(f"{row['body']}")
+                log.debug(f'Intermediate summary for storyId {row["storyId"]}: {intermediate_response}')
                 #intermediate_summary = intermediate_response.output_text
                 final_input = intermediate_response
             else:
                 final_input = row['body']
 
-            client.instructions = prompt    
+            client.instructions = prompt
+            log.debug(f'Generating final rating for storyId {row["storyId"]}.')
             response = client.get_response(final_input)
+            log.debug(f'Final rating for storyId {row["storyId"]}: {response}')
             ratings.append(response)
         except Exception as e:
             print(f"Error generating rating for storyId {row['storyId']}: {e}")
             ratings.append(None)
     df['rating'] = ratings
-    df.drop_duplicates(subset=['timestamp'], inplace=True)
+    #df.drop_duplicates(subset=['timestamp'], inplace=True)
     df = df[df['rating'].notna()]
     df['rating'] = pd.to_numeric(df['rating'], errors='coerce').dropna()
 
@@ -267,18 +271,24 @@ class ExceededRequestsError(Exception):
 
 def check_job_completed(job_id: str, run_id: str, conn: Connection) -> int:
     cur_local = conn.cursor()
-    cur_local.execute("SELECT 1 FROM JobCompleted WHERE jobId = ? AND runId = ? LIMIT 1", (job_id, run_id))
+    log.debug(f"Checking if job is completed: {job_id}, {run_id}")
+    statement = f"SELECT 1 FROM JobCompleted WHERE jobId = '{job_id}' AND runId = '{run_id}' LIMIT 1"
+    cur_local.execute(statement)
     if cur_local.fetchone() is not None:
+        log.debug(f"Job is completed: {job_id}, {run_id}")
         cur_local.close()
         return 1
     else:
+        log.debug(f"Job is not completed: {job_id}, {run_id}")
         cur_local.close()
         return 0
 
 def mark_job_completed(job_id: str, run_id: str, conn: Connection) -> None:
     cur_local = conn.cursor()
+    statement = "INSERT INTO JobCompleted (jobId, runId, completed_at) VALUES (?, ?, ?)"
+    log.debug(f"Marking job as completed: {job_id}, {run_id}")
     cur_local.execute(
-        "INSERT INTO JobCompleted (jobId, runId, completed_at) VALUES (?, ?, ?)",
+        statement,
         (job_id, run_id, datetime.now())
     )
     conn.commit()
