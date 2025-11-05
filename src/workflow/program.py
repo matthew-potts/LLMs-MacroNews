@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", required=False, help="Start date (YYYY-MM-DD)")
     p.add_argument("--end", required=False, help="End date (YYYY-MM-DD)")
     p.add_argument("--run_id", required=False, help="ID of an existing run")
-    p.add_argument("--stage", required=False, choices=["get_data", "get_market_data", "generate_ratings", "regress"], help="Stage to run: get_data/get_market_data/generate_ratings/regress")
+    p.add_argument("--stage", required=False, choices=["get_news", "get_market_data", "generate_ratings", "regress"], help="Stage to run: get_news/get_market_data/generate_ratings/regress")
     args = p.parse_args()
 
     if args.run_id:
@@ -67,7 +67,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     start_date, end_date = row
     cur.close()
 
-    if stage <= Stage.get_data:
+    if stage <= Stage.get_news:
         ld.open_session()
         rd.open_session()
         stories = get_stories(run_id, start_date, end_date, _SEARCH_COUNT, conn)
@@ -77,7 +77,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         rd.close_session()
     else:
         stories_csv = f'{file_dir}/stories.csv'
-        log.info(f'{Stage.get_data.name} stage skipped. Loading stories from {stories_csv}.')        
+        log.info(f'{Stage.get_news.name} stage skipped. Loading stories from {stories_csv}.')        
         stories = pd.read_csv(stories_csv, index_col=0, parse_dates=[0])  # parse index as datetime
 
     indices = pd.read_csv(f'data/indices_majors.csv')
@@ -114,13 +114,16 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     else:
         ratings_csv = f'{file_dir}/ratings.csv'
         log.info(f'{Stage.generate_ratings.name} stage skipped. Loading ratings from {ratings_csv}.')
-        ratings = pd.read_csv(ratings_csv)
+        ratings = pd.read_csv(ratings_csv, header=0, parse_dates=['timestamp'])
         ratings.dropna(subset=['rating'], inplace=True)
 
     if stage <= Stage.regress:  
         regression_data = create_regression_data(df_prices, ratings)
         model = regress(regression_data)
-        print(model.summary())
+        # print(model.summary())
+        with open(f'{file_dir}/regression_summary.txt', 'w') as f:
+            f.write(model.summary().as_text())
+        log.info(f'Regression results saved to {file_dir}/regression_summary.txt.')
 
 if __name__ == "__main__":
     args = parse_args()

@@ -63,17 +63,24 @@ def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Con
     ).get_data().data.df
     important_topic = pd.merge(topic[['headline', 'storyId', 'timestamp']], topnews[['storyId']], on="storyId")
 
-    
-    # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive   
+    log.info(f'Found {len(important_topic)} important stories between {start} and {end}.')
+
+    # Only fetch the latest version of each story
+    important_topic['base_storyId'] = important_topic['storyId'].str.rsplit(':', n=1).str[0]
+    important_topic['version'] = important_topic['storyId'].str.rsplit(':', n=1).str[1]
+
+    important_topic = important_topic.sort_values('version', ascending=False).groupby('base_storyId').first().reset_index().drop(columns=['version', 'base_storyId'])
+
+    # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive
     important_topic = important_topic[important_topic['headline'].str.isupper()]
     important_topic = important_topic[
         (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
         (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
     ]
 
-    important_topic.set_index('timestamp', inplace=True)
+    log.info(f'After filtering, {len(important_topic)} important stories remain.')
 
-    log.info(f'Found {len(important_topic)} important stories between {start} and {end}.')
+    important_topic.set_index('timestamp', inplace=True)
 
     bodies = []
 
@@ -82,17 +89,18 @@ def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Con
         if response is None:
             continue
         try:
-            #ts = response.data.raw['newsItem']['itemMeta']['versionCreated']['$']
             body = response.data.raw['newsItem']['contentSet']['inlineData'][0]['$']
-            log.debug(f'Fetched storyId {story_id}.')
+            log.debug(f'Fetched body of storyId {story_id}.')
         except Exception:
             continue
 
         bodies.append(body)
 
     important_topic['body'] = bodies
-    df_stories = important_topic[['headline', 'storyId', 'body']].drop_duplicates()
 
+    df_stories = important_topic[['headline', 'body']].copy()
+
+    # df_stories.set_index('timestamp', inplace=True)
     mark_job_completed("get_data", run_id, conn)
     
     return df_stories
@@ -131,14 +139,8 @@ def get_market_data_by_index(index: str, timestamp: pd.Timestamp) -> pd.DataFram
 @print_start
 def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, output_csv: str, batch_size: int) -> pd.DataFrame:
 
-    if check_job_completed("get_market_data", run_id, conn):
-        raise Exception(f"Job get_market_data already completed for runId: {run_id}")
-
     df['Data'] = None
     market_data = [None] * len(df)
-    # Prepare CSV with headers if it doesn't exist
-    if not os.path.exists(output_csv):
-        pd.DataFrame(columns=['Index', 'start', 'Timestamp', 'TRDPRC_1']).to_csv(output_csv, index=False)
     
     expanded_rows = []
     processed_count = 0
@@ -159,6 +161,8 @@ def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, out
                     data_df = result.copy()
                     data_df['start'] = df.loc[idx, 'start']
                     data_df['Index'] = df.loc[idx, 'Index']
+                    # Select only the 4 columns we want
+                    data_df = data_df[['Index', 'start', 'Timestamp', 'TRDPRC_1']]
                     expanded_rows.append(data_df)
                     
                 processed_count += 1
@@ -166,28 +170,29 @@ def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, out
                 # Write batch to CSV incrementally
                 if len(expanded_rows) >= batch_size:
                     batch_df = pd.concat(expanded_rows, ignore_index=True)
-                    batch_df.to_csv(output_csv, mode='a', header=False, index=False)
-                    log.debug(f"Wrote batch of {len(expanded_rows)} rows to {output_csv} ({processed_count}/{len(df)} processed)")
+                    # Write headers only if file doesn't exist
+                    write_header = not os.path.exists(output_csv)
+                    batch_df.to_csv(output_csv, mode='a', header=write_header, index=False)
+                    log.info(f"Wrote batch of {len(expanded_rows)} rows to {output_csv} ({processed_count}/{len(df)} processed)")
                     expanded_rows = []
                     
             except ExceededRequestsError:
                 log.warning(f"Rate limit exceeded at row {idx}. Saving progress and re-raising.")
-                # Write any remaining rows before re-raising
                 if expanded_rows:
                     batch_df = pd.concat(expanded_rows, ignore_index=True)
-                    batch_df.to_csv(output_csv, mode='a', header=False, index=False)
+                    write_header = not os.path.exists(output_csv)
+                    batch_df.to_csv(output_csv, mode='a', header=write_header, index=False)
                 raise
             except Exception as e:
-                import traceback
-                log.error(f"Error processing index {idx}: {e}")
-                log.error(traceback.format_exc())
+                log.warning(f"Error processing index {idx}: {e}")
                 market_data[idx] = pd.DataFrame()
     
     # Write any remaining rows
     if expanded_rows:
         batch_df = pd.concat(expanded_rows, ignore_index=True)
-        batch_df.to_csv(output_csv, mode='a', header=False, index=False)
-        print(f"Wrote final batch of {len(expanded_rows)} rows to {output_csv}")
+        write_header = not os.path.exists(output_csv)
+        batch_df.to_csv(output_csv, mode='a', header=write_header, index=False)
+        log.info(f"Wrote final batch of {len(expanded_rows)} rows to {output_csv}")
     
     df['Data'] = market_data
     mark_job_completed("get_market_data", run_id, conn)
@@ -198,6 +203,8 @@ def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, out
 def generate_ratings(run_id: str, df: pd.DataFrame, client: LLMClient, prompt: str, conn: sqlite3.Connection) -> pd.DataFrame:
     
     check_job_completed("generate_ratings", run_id, conn)
+
+    # group the story Ids
 
     ratings = []
     for _, row in df.iterrows():
@@ -237,7 +244,7 @@ def create_regression_data(df_prices: pd.DataFrame, ratings: pd.DataFrame) -> pd
     df_prices = df_prices[df_prices['D_TRDPRC_1'].notna()]
     data_for_regression = pd.merge(df_prices, ratings, left_on='start', right_on='timestamp', how='inner')
     data_for_regression['Timestamp'] = pd.to_datetime(data_for_regression['Timestamp'], errors='coerce')
-    data_for_regression = data_for_regression.drop_duplicates(subset=['timestamp', 'Index']).dropna()
+    data_for_regression = data_for_regression.drop_duplicates(subset=['Timestamp', 'Index']).dropna()
 
     return data_for_regression
 
