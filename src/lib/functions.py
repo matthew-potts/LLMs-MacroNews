@@ -98,7 +98,7 @@ def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Con
 
     important_topic['body'] = bodies
 
-    df_stories = important_topic[['headline', 'body']].copy()
+    df_stories = important_topic[['headline', 'body', 'storyId']].copy()
 
     # df_stories.set_index('timestamp', inplace=True)
     mark_job_completed("get_data", run_id, conn)
