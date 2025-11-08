@@ -18,6 +18,7 @@ import os
 from anthropic import Anthropic
 from src.lib.llm_client import LLMClient
 from src.logging.logger import logger
+from src.workflow.topic import Topic
 
 log = logger(__name__)
 
@@ -45,23 +46,24 @@ elif _INTERVAL == "ONE_HOUR":
     _INTERVAL = historical_pricing.Intervals.ONE_HOUR
 
 @print_start
-def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Connection) -> pd.DataFrame:
-    topic = news.headlines.Definition(
-        query="Fed",
+def get_stories(start: str, end: str, count: int, topic: Topic) -> pd.DataFrame:
+    topic_news = news.headlines.Definition(
+        query=topic.value,
         date_from=start,
         date_to=end, 
         count=count
     ).get_data().data.df
 
-    topic['timestamp'] = topic.index
+    topic_news['timestamp'] = topic_news.index
 
-    topnews = news.headlines.Definition(
+    top_news = news.headlines.Definition(
         query="TOPNWS",
         date_from=start,
         date_to=end,
         count=count
     ).get_data().data.df
-    important_topic = pd.merge(topic[['headline', 'storyId', 'timestamp']], topnews[['storyId']], on="storyId")
+
+    important_topic = pd.merge(topic_news[['headline', 'storyId', 'timestamp']], top_news[['storyId']], on="storyId")
 
     log.info(f'Found {len(important_topic)} important stories between {start} and {end}.')
 
@@ -99,9 +101,6 @@ def get_stories(run_id: str, start: str, end: str, count: int, conn: sqlite3.Con
     important_topic['body'] = bodies
 
     df_stories = important_topic[['headline', 'body', 'storyId']].copy()
-
-    # df_stories.set_index('timestamp', inplace=True)
-    mark_job_completed("get_data", run_id, conn)
     
     return df_stories
 
@@ -137,7 +136,7 @@ def get_market_data_by_index(index: str, timestamp: pd.Timestamp) -> pd.DataFram
     return response
 
 @print_start
-def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, output_csv: str, batch_size: int) -> pd.DataFrame:
+def get_market_data(df: pd.DataFrame, output_csv: str, batch_size: int) -> pd.DataFrame:
 
     df['Data'] = None
     market_data = [None] * len(df)
@@ -195,16 +194,11 @@ def get_market_data(run_id: str, df: pd.DataFrame, conn: sqlite3.Connection, out
         log.info(f"Wrote final batch of {len(expanded_rows)} rows to {output_csv}")
     
     df['Data'] = market_data
-    mark_job_completed("get_market_data", run_id, conn)
     
     return pd.read_csv(output_csv, parse_dates=['start', 'Timestamp'])
 
 @print_start
-def generate_ratings(run_id: str, df: pd.DataFrame, client: LLMClient, prompt: str, conn: sqlite3.Connection) -> pd.DataFrame:
-    
-    check_job_completed("generate_ratings", run_id, conn)
-
-    # group the story Ids
+def generate_ratings(df: pd.DataFrame, client: LLMClient, prompt: str) -> pd.DataFrame:
 
     ratings = []
     for _, row in df.iterrows():
@@ -231,8 +225,6 @@ def generate_ratings(run_id: str, df: pd.DataFrame, client: LLMClient, prompt: s
     #df.drop_duplicates(subset=['timestamp'], inplace=True)
     df = df[df['rating'].notna()]
     df['rating'] = pd.to_numeric(df['rating'], errors='coerce').dropna()
-
-    mark_job_completed("generate_ratings", run_id, conn)
 
     return df
 
