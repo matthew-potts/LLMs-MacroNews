@@ -1,21 +1,16 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import sqlite3
 import threading
-from xmlrpc import client
-import lseg.data as ld
 from lseg.data.content import news, historical_pricing
 from datetime import timedelta
 import pandas as pd
 from typing import List
 import refinitiv.data as rd
-from openai import OpenAI
 import statsmodels.api as sm
 from statsmodels.regression.linear_model import RegressionResultsWrapper
 from sqlite3 import Connection
 from datetime import datetime
 import json
 import os
-from anthropic import Anthropic
 from src.lib.llm_client import LLMClient
 from src.logging.logger import logger
 from src.workflow.topic import Topic
@@ -44,63 +39,103 @@ if _INTERVAL == "THIRTY_MINUTES":
     _INTERVAL = historical_pricing.Intervals.THIRTY_MINUTES
 elif _INTERVAL == "ONE_HOUR":
     _INTERVAL = historical_pricing.Intervals.ONE_HOUR
+_COUNT = _CFG.get("SEARCH_COUNT", 1000000)
 
-@print_start
-def get_stories(start: str, end: str, count: int, topic: Topic) -> pd.DataFrame:
-    topic_news = news.headlines.Definition(
-        query=topic.value,
-        date_from=start,
-        date_to=end, 
-        count=count
-    ).get_data().data.df
+def fetch_headlines(topic: str, start: str, end: str, count: int) -> pd.DataFrame:
+    """Fetch news headlines for a given query and date range."""
 
-    topic_news['timestamp'] = topic_news.index
+    log.debug(f'Fetching headlines for query "{topic}" between {start} and {end}.')
 
-    top_news = news.headlines.Definition(
-        query="TOPNWS",
+    headlines = news.headlines.Definition(
+        query=topic,
         date_from=start,
         date_to=end,
         count=count
     ).get_data().data.df
+    
+    log.info(f'Found {len(headlines)} stories for query "{topic}" between {start} and {end}.')
+    
+    return headlines
+
+def fetch_story_bodies(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
+    """Fetch full story bodies for a DataFrame of headlines with storyId column.
+    
+    Args:
+        df: DataFrame with 'storyId' and 'headline' columns, indexed by timestamp
+        batch_size: Number of stories to process before logging progress
+        
+    Returns:
+        DataFrame with columns: timestamp, storyId, headline, body
+    """
+    all_stories = []
+    
+    story_ids = list(df['storyId'].items())
+    total_stories = len(story_ids)
+    
+    for i in range(0, total_stories, batch_size):
+        batch = story_ids[i:i + batch_size]
+        batch_data = []
+        
+        for idx, story_id in batch:
+            response = news.story.Definition(story_id=story_id).get_data()
+            if response is None:
+                continue
+            try:
+                body = response.data.raw['newsItem']['contentSet']['inlineData'][0]['$']
+                batch_data.append({
+                    'timestamp': idx,
+                    'storyId': story_id,
+                    'headline': df.loc[idx, 'headline'],
+                    'body': body
+                })
+                log.debug(f'Fetched body of storyId {story_id}.')
+            except Exception as e:
+                log.warning(f'Failed to fetch storyId {story_id}: {e}')
+                continue
+        
+        # Add batch to accumulated stories
+        all_stories.extend(batch_data)
+        log.info(f'Processed {min(i + batch_size, total_stories)}/{total_stories} stories')
+    
+    # Convert to DataFrame
+    df_stories = pd.DataFrame(all_stories)
+    if not df_stories.empty:
+        df_stories.set_index('timestamp', inplace=True)
+    
+    return df_stories
+
+@print_start
+def get_stories(start: str, end: str, topic: Topic, refine_search: bool) -> pd.DataFrame:
+    topic_news = fetch_headlines(topic, start, end, _COUNT)
+
+    topic_news['timestamp'] = topic_news.index
+
+    top_news = fetch_headlines("TOPNWS", start, end, _COUNT)
 
     important_topic = pd.merge(topic_news[['headline', 'storyId', 'timestamp']], top_news[['storyId']], on="storyId")
 
-    log.info(f'Found {len(important_topic)} important stories between {start} and {end}.')
+    log.info(f'Found {len(important_topic)} important stories for topic {topic.value} between {start} and {end}.')
 
-    # Only fetch the latest version of each story
-    important_topic['base_storyId'] = important_topic['storyId'].str.rsplit(':', n=1).str[0]
-    important_topic['version'] = important_topic['storyId'].str.rsplit(':', n=1).str[1]
+    if refine_search:
+        # Only fetch the latest version of each story
+        important_topic['base_storyId'] = important_topic['storyId'].str.rsplit(':', n=1).str[0]
+        important_topic['version'] = important_topic['storyId'].str.rsplit(':', n=1).str[1]
 
-    important_topic = important_topic.sort_values('version', ascending=False).groupby('base_storyId').first().reset_index().drop(columns=['version', 'base_storyId'])
+        important_topic = important_topic.sort_values('version', ascending=False).groupby('base_storyId').first().reset_index().drop(columns=['version', 'base_storyId'])
+        
+        # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive
+        important_topic = important_topic[important_topic['headline'].str.isupper()]
+        important_topic = important_topic[
+            (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
+            (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
+        ]
 
-    # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive
-    important_topic = important_topic[important_topic['headline'].str.isupper()]
-    important_topic = important_topic[
-        (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
-        (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
-    ]
-
-    log.info(f'After filtering, {len(important_topic)} important stories remain.')
+        log.info(f'After filtering, {len(important_topic)} important stories remain.')
 
     important_topic.set_index('timestamp', inplace=True)
 
-    bodies = []
-
-    for idx, story_id in important_topic['storyId'].items():
-        response = news.story.Definition(story_id=story_id).get_data()
-        if response is None:
-            continue
-        try:
-            body = response.data.raw['newsItem']['contentSet']['inlineData'][0]['$']
-            log.debug(f'Fetched body of storyId {story_id}.')
-        except Exception:
-            continue
-
-        bodies.append(body)
-
-    important_topic['body'] = bodies
-
-    df_stories = important_topic[['headline', 'body', 'storyId']].copy()
+    # Fetch story bodies using the extracted function
+    df_stories = fetch_story_bodies(important_topic)
     
     return df_stories
 
@@ -204,7 +239,7 @@ def generate_ratings(df: pd.DataFrame, client: LLMClient, prompt: str) -> pd.Dat
     for _, row in df.iterrows():
         try:
             if _GENERATE_INTERMEDIATE_SUMMARIES:
-                client.instructions = f"You are an expert financial analyst. Summarize the following news article in a concise manner, maximum 3 sentences:\n\n{row['body']}\n\nSummary:"
+                client.instructions = f"You are an expert financial analyst. Summarize the following news article in a concise manner, maximum 2 sentences:\n\n{row['body']}\n\nSummary:"
                 log.debug(f'Generating intermediate summary for storyId {row["storyId"]}.')
                 intermediate_response = client.get_response(f"{row['body']}")
                 log.debug(f'Intermediate summary for storyId {row["storyId"]}: {intermediate_response}')

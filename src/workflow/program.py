@@ -50,6 +50,7 @@ _INDICES_LIST = _CFG.get("COUNTRIES", "indices_majors.csv")
 _INDICES = pd.read_csv(f'data/{_INDICES_LIST}')
 _MARKET_DATA_PERIOD_HOURS = _CFG.get("MARKET_DATA_PERIOD_HOURS", 1)
 _TOPIC = _CFG.get("TOPIC", "U.S. Federal Reserve")
+_REFINE_SEARCH = _CFG.get("REFINE_SEARCH", True)
 
 def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
 
@@ -77,7 +78,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         if not check_job_completed("get_news", run_id, conn):
             ld.open_session()
             rd.open_session()
-            stories = get_stories(start_date, end_date, _SEARCH_COUNT, topic)
+            stories = get_stories(start_date, end_date, _SEARCH_COUNT, topic, _REFINE_SEARCH)
             stories.to_csv(f'{file_dir}/stories.csv', index=True)
             mark_job_completed("get_news", run_id, conn)
             ld.close_session()
@@ -167,7 +168,6 @@ def save_results(results: pd.DataFrame, run_id: str) -> None:
 
     return None
     
-
 if __name__ == "__main__":
     args = parse_args()
     stage = Stage[args.stage]
