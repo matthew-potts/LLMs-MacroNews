@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import json
 import traceback
 from src.logging.logger import logger
-from src.lib.llm_client import LLMClient
+from src.lib.llm_client_factory import LLMClientFactory
 from src.workflow.stage import Stage
 from src.workflow.topic import Topic
 load_dotenv()
@@ -43,11 +43,10 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.j
 with open(_CONFIG_PATH, "r") as _cfg_f:
     _CFG = json.load(_cfg_f)
 
-_SEARCH_COUNT = _CFG.get("SEARCH_COUNT", 1000000)
 _DATABASE = _CFG.get("DATABASE", "../../data/database/llms_macronews.db")
 _BATCH_SIZE = _CFG.get("MARKET_DATA_BATCH_SIZE", 10000)
 _INDICES_LIST = _CFG.get("COUNTRIES", "indices_majors.csv")
-_INDICES = pd.read_csv(f'data/{_INDICES_LIST}')
+_INDICES = pd.read_csv(f'{_INDICES_LIST}')
 _MARKET_DATA_PERIOD_HOURS = _CFG.get("MARKET_DATA_PERIOD_HOURS", 1)
 _TOPIC = _CFG.get("TOPIC", "U.S. Federal Reserve")
 _REFINE_SEARCH = _CFG.get("REFINE_SEARCH", True)
@@ -59,10 +58,10 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     file_dir = f'data/runs/{run_id}'
     os.makedirs(file_dir, exist_ok=True)
     
-    with open(f'data/prompt.txt') as f:
+    with open(f'data/prompt_scale.txt') as f:
         prompt = f.read()
 
-    client = LLMClient(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
+    client = LLMClientFactory.create(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
 
     cur = conn.cursor()
     cur.execute("SELECT start_date, end_date FROM Run WHERE run_id = ?", (run_id,))
@@ -78,7 +77,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         if not check_job_completed("get_news", run_id, conn):
             ld.open_session()
             rd.open_session()
-            stories = get_stories(start_date, end_date, _SEARCH_COUNT, topic, _REFINE_SEARCH)
+            stories = get_stories(start_date, end_date, topic, _REFINE_SEARCH)
             stories.to_csv(f'{file_dir}/stories.csv', index=True)
             mark_job_completed("get_news", run_id, conn)
             ld.close_session()
