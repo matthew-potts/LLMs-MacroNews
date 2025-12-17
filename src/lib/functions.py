@@ -106,7 +106,7 @@ def fetch_story_bodies(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
 
 @print_start
 def get_stories(start: str, end: str, topic: Topic, refine_search: bool) -> pd.DataFrame:
-    topic_news = fetch_headlines(topic, start, end, _COUNT)
+    topic_news = fetch_headlines(topic.value, start, end, _COUNT)
 
     topic_news['timestamp'] = topic_news.index
 
