@@ -1,11 +1,7 @@
-
-
-import os
+import os, json, glob, time, logging
 import pandas as pd
-import json
-import time
-import logging
 from openai import OpenAI
+from src.lib.llm_client import LLMClient
 
 # Configure logger
 logger = logging.getLogger('batch_creator')
@@ -15,19 +11,18 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# read in fed_FULL data
-df = pd.read_csv('../data/analysis/fed_top_news_stories_2025.csv', parse_dates=['timestamp'])
-
-# Create json data from DataFrame
-
 def create_jsonl(df: pd.DataFrame, output_file: str) -> None:
+
+    with open(f'data/prompt_scale.txt') as f:
+        prompt = f.read()
+
     def batch_row(story) -> str:
         # Create batch_row object to transform to jsonl compatible with API
         body_escaped = json.dumps(story['body'])[1:-1]  # Remove outer quotes from all text fields
         headline_escaped = json.dumps(story['headline'])[1:-1]
         prompt_escaped = json.dumps(prompt)[1:-1]
         
-        return f'{{"custom_id": "request-{story["storyId"]}", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "gpt-4o", "messages": [{{"role": "system", "content": "{prompt_escaped}"}},{{"role": "user", "content": "{headline_escaped} {body_escaped}"}}],"max_tokens": 3000}}}}'
+        return f'{{"custom_id": "request-{story["storyId"]}.Timestamp-{str(story.name)}", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "gpt-5-mini", "messages": [{{"role": "system", "content": "{prompt_escaped}"}},{{"role": "user", "content": "{headline_escaped} {body_escaped}"}}],"max_tokens": 3000}}}}'
     
     df = df.apply(batch_row, axis=1)
 
@@ -38,15 +33,13 @@ def create_jsonl(df: pd.DataFrame, output_file: str) -> None:
             f.write(str(row) + '\n')
     return
 
-# function to slice an input JSONL file into multiple batch files, optionally upload them,
-# create batch jobs pointing at the uploaded files, and throttle concurrent submissions.
 def create_batches(
-
-    input_batch_file: str,
-    batch_size: int,
-    out_dir: str = '../data/analysis/batches',
-    endpoint: str = '/v1/chat/completions',
-    max_concurrent_batches: int = 2
+        client: OpenAI,
+        input_batch_file: str,
+        batch_size: int,
+        out_dir: str = '../data/analysis/batches',
+        endpoint: str = '/v1/chat/completions',
+        max_concurrent_batches: int = 2
     ) -> list:
     # Read all non-empty lines
     with open(input_batch_file, 'r') as f:
@@ -76,11 +69,10 @@ def create_batches(
         logger.info('Wrote batch file %s (%d lines)', batch_path, len(batch_lines))
 
         entry: dict = {"batch_file": batch_path}
-
         # Optionally upload the batch file to the Files API
 
         logger.info('Uploading %s', batch_path)
-        file_resp = _CLIENT.files.create(
+        file_resp = client.files.create(
             file=open(batch_path, 'rb'),
             purpose='batch',
             expires_after={
@@ -120,7 +112,7 @@ def create_batches(
                 raise RuntimeError(f"Missing file_id for uploaded file: {next_entry}")
 
             logger.info('Creating batch for %s using file_id=%s', batch_file, file_id)
-            batch_resp = _CLIENT.batches.create(
+            batch_resp = client.batches.create(
                 input_file_id=file_id,
                 endpoint=endpoint,
                 completion_window='24h'
@@ -148,7 +140,7 @@ def create_batches(
         to_remove = []
         for r in running:
             bid = r.get('batch_id')
-            status = _CLIENT.batches.retrieve(bid).status
+            status = client.batches.retrieve(bid).status
             
             logger.info('Batch %s status=%s', bid, status)
             if status in ('completed', 'failed') or status == 'succeeded':  
@@ -159,20 +151,17 @@ def create_batches(
             logger.info('Batch %s finished; freed a slot (running now=%d)', r.get('batch_id'), len(running))
 
         if pending_to_create and len(running) < max_concurrent_batches:
-            # loop will submit more immediately
             continue
 
-        # If still running batches, wait before polling again
         if running:
             logger.info('Waiting %s seconds before next status poll (running=%d pending=%d)', '10.0', len(running), len(pending_to_create))
-            time.sleep(10.0)
+            time.sleep(10.0)    
 
     logger.info('create_batches finished; total results=%d', len(results))
     return results
 
 
-def write_results_from_batches(results, output_jsonl_path):
-
+def write_results_from_batches(results, output_jsonl_path, client: OpenAI) -> None:
     # Ensure output directory exists and start with a clean file
     out_dir = os.path.dirname(output_jsonl_path) or '.'
     os.makedirs(out_dir, exist_ok=True)
@@ -184,14 +173,14 @@ def write_results_from_batches(results, output_jsonl_path):
     for entry in results:
         batch_id = entry.get('batch_id')
 
-        batch_info = _CLIENT.batches.retrieve(batch_id)
+        batch_info = client.batches.retrieve(batch_id)
 
         # locate output file id (support different shapes)
         file_id = getattr(batch_info, 'output_file_id', None) or getattr(batch_info, 'output_file', None)
 
         logger.info('Downloading output file %s for batch %s', file_id, batch_id)
 
-        results = _CLIENT.files.content(file_id)
+        results = client.files.content(file_id)
 
         with open(output_jsonl_path, 'a', encoding='utf-8') as outf:
             for raw in results.iter_lines():
@@ -206,7 +195,7 @@ def write_results_from_batches(results, output_jsonl_path):
     return output_jsonl_path
 
 
-def read_batch_outputs_to_df(outputs_dir=None, glob_pattern='*.jsonl') -> 'pd.DataFrame':
+def read_batch_outputs(outputs_dir=None, glob_pattern='*.jsonl') -> 'pd.DataFrame':
 
     paths = glob.glob(os.path.join(outputs_dir, glob_pattern))
 
@@ -222,19 +211,26 @@ def read_batch_outputs_to_df(outputs_dir=None, glob_pattern='*.jsonl') -> 'pd.Da
                     logger.warning('Skipping malformed JSON line %s:%d (%s)', p, lineno, e)
                     continue
 
-                request_id = obj.get('response', {}).get('request_id') or obj.get('request_id') or obj.get('id')
+                raw_req = obj.get('response', {}).get('custom_id') or obj.get('custom_id') or obj.get('id')
+                # Split request_id into requestID and timestamp (if present)
+                requestID = raw_req
+                timestamp = None
+                if isinstance(raw_req, str) and '.Timestamp' in raw_req:
+                    left, right = raw_req.split('.Timestamp', 1)
+                    requestID = left
+                    timestamp = right.lstrip('-')                
                 custom_id = obj.get('custom_id') or obj.get('customId') or None
                 story_id = custom_id[len('request-'):]
         
                 content = obj['response']['body']['choices'][0]['message']['content']
                 rows.append({
-                    'requestID': str(request_id) if request_id is not None else None,
-                    'storyID': str(story_id) if story_id is not None else None,
-                    'content': str(content),
+                    'requestID': requestID,
+                    'timestamp': timestamp,
+                    'storyID': story_id,
+                    'content': content,
                     'source_file': p
                 })
 
     df = pd.DataFrame(rows)
     logger.info('Parsed %d rows from %d files', len(df), len(paths))
-    display(df.head())
-    return df
+    return df   

@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from xmlrpc import client
 from lseg.data.content import news, historical_pricing
 from datetime import timedelta
 import pandas as pd
@@ -14,6 +15,7 @@ import os
 from src.lib.llm_client import LLMClient
 from src.logging.logger import logger
 from src.workflow.topic import Topic
+from src.lib.batch.batch import create_jsonl, create_batches, write_results_from_batches, read_batch_outputs
 
 log = logger(__name__)
 
@@ -32,7 +34,7 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.j
 with open(_CONFIG_PATH, "r") as _cfg_f:
     _CFG = json.load(_cfg_f)
 
-_GENERATE_INTERMEDIATE_SUMMARIES = _CFG.get("GENERATE_INTERMEDIATE_SUMMARIES", True)
+_GENERATE_INTERMEDIATE_SUMMARIES = _CFG.get("GENERATE_INTERMEDIATE_SUMMARIES", False)
 _MARKET_DATA_PERIOD_HOURS = _CFG.get("MARKET_DATA_PERIOD_HOURS", 1)
 _INTERVAL = _CFG.get("INTERVAL", "THIRTY_MINUTES")
 if _INTERVAL == "THIRTY_MINUTES":
@@ -124,11 +126,11 @@ def get_stories(start: str, end: str, topic: Topic, refine_search: bool) -> pd.D
         important_topic = important_topic.sort_values('version', ascending=False).groupby('base_storyId').first().reset_index().drop(columns=['version', 'base_storyId'])
         
         # Heuristic: Filter on caps in headline and only grab the stories between 9am and 5pm inclusive
-        important_topic = important_topic[important_topic['headline'].str.isupper()]
-        important_topic = important_topic[
-            (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
-            (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
-        ]
+        # important_topic = important_topic[important_topic['headline'].str.isupper()]
+        # important_topic = important_topic[
+        #     (important_topic['timestamp'].dt.time >= pd.Timestamp('09:00:00').time()) &
+        #     (important_topic['timestamp'].dt.time <= pd.Timestamp('17:00:00').time())
+        # ]
 
         log.info(f'After filtering, {len(important_topic)} important stories remain.')
 
@@ -233,8 +235,34 @@ def get_market_data(df: pd.DataFrame, output_csv: str, batch_size: int) -> pd.Da
     return pd.read_csv(output_csv, parse_dates=['start', 'Timestamp'])
 
 @print_start
-def generate_ratings(df: pd.DataFrame, client: LLMClient, prompt: str) -> pd.DataFrame:
+def run_batch(df: pd.DataFrame, client: LLMClient) -> pd.DataFrame:
+    try:
+        create_jsonl(df, 'data/analysis/batches/input_batch.jsonl')
+    except Exception as e:
+        print(f'Exception occurred while creating JSONL: {e}')
+        return None
+    try:
+        results = create_batches(
+            client=client,
+            input_batch_file='data/analysis/batches/input_batch.jsonl',
+            batch_size=50,
+            out_dir='data/analysis/batches',
+            endpoint='/v1/chat/completions',
+            max_concurrent_batches=2
+        )
+    except Exception as e:
+        print(f'Exception occurred while creating batches: {e}')
+        return None
 
+    write_results_from_batches(results, 'data/analysis/batches/output_batch.jsonl', client)
+
+    df_results = read_batch_outputs(outputs_dir='data/analysis/batches', glob_pattern='output_batch.jsonl')
+
+    return df_results
+
+
+@print_start
+def generate_ratings(df: pd.DataFrame, client: LLMClient, prompt: str) -> pd.DataFrame:
     ratings = []
     for _, row in df.iterrows():
         try:
@@ -269,6 +297,8 @@ def create_regression_data(df_prices: pd.DataFrame, ratings: pd.DataFrame) -> pd
     df_prices['D_TRDPRC_1'] = df_prices.groupby(['Index', 'start'])['TRDPRC_1'].shift(1) - df_prices['TRDPRC_1']
     # instead of shifting, drop where D_TRDPRC_1     is NA
     df_prices = df_prices[df_prices['D_TRDPRC_1'].notna()]
+    ratings['timestamp'] = pd.to_datetime(ratings['timestamp'], errors='coerce')
+
     data_for_regression = pd.merge(df_prices, ratings, left_on='start', right_on='timestamp', how='inner')
     data_for_regression['Timestamp'] = pd.to_datetime(data_for_regression['Timestamp'], errors='coerce')
     data_for_regression = data_for_regression.drop_duplicates(subset=['Timestamp', 'Index']).dropna()
@@ -278,7 +308,7 @@ def create_regression_data(df_prices: pd.DataFrame, ratings: pd.DataFrame) -> pd
 @print_start
 def regress(data_for_regression: pd.DataFrame) -> RegressionResultsWrapper:
 
-    X = pd.to_numeric(data_for_regression['rating'], errors='coerce') #.dropna().reset_index(drop=True)
+    X = pd.to_numeric(data_for_regression['content'], errors='coerce') #.dropna().reset_index(drop=True)
     y = pd.to_numeric(data_for_regression['D_TRDPRC_1'], errors='coerce') #.dropna().reset_index(drop=True)
     X = sm.add_constant(X)
 

@@ -6,7 +6,7 @@ import lseg.data as ld
 from openai import OpenAI
 import refinitiv.data as rd
 import pandas as pd
-from src.lib.functions import get_stories, get_indices, get_market_data, generate_ratings, create_regression_data, regress, check_job_completed, mark_job_completed
+from src.lib.functions import get_stories, get_indices, get_market_data, generate_ratings, create_regression_data, regress, check_job_completed, mark_job_completed, run_batch
 import sqlite3
 import os
 from dotenv import load_dotenv
@@ -44,8 +44,9 @@ with open(_CONFIG_PATH, "r") as _cfg_f:
     _CFG = json.load(_cfg_f)
 
 _DATABASE = _CFG.get("DATABASE", "../../data/database/llms_macronews.db")
+_USE_BATCHES = _CFG.get("USE_BATCHES", True)
 _BATCH_SIZE = _CFG.get("MARKET_DATA_BATCH_SIZE", 10000)
-_INDICES_LIST = _CFG.get("COUNTRIES", "indices_majors.csv")
+_INDICES_LIST = _CFG.get("COUNTRIES", "/Users/matthewpotts/Documents/Career/Projects/LLMs-MacroNews/data/indices_majors.csv")
 _INDICES = pd.read_csv(f'{_INDICES_LIST}')
 _MARKET_DATA_PERIOD_HOURS = _CFG.get("MARKET_DATA_PERIOD_HOURS", 1)
 _TOPIC = _CFG.get("TOPIC", "U.S. Federal Reserve")
@@ -61,7 +62,8 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     with open(f'data/prompt_scale.txt') as f:
         prompt = f.read()
 
-    client = LLMClientFactory.create(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
+    #client = LLMClientFactory.create(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
+    client = OpenAI(api_key=os.getenv("OPEN_AI_SECRET_KEY"))
 
     cur = conn.cursor()
     cur.execute("SELECT start_date, end_date FROM Run WHERE run_id = ?", (run_id,))
@@ -125,8 +127,12 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     if stage <= Stage.generate_ratings:
         if not check_job_completed("generate_ratings", run_id, conn):
             stories.drop_duplicates(inplace=True)
-            ratings = generate_ratings(stories, client, prompt)
-            ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
+            if _USE_BATCHES:
+                ratings = run_batch(stories, client)
+                ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
+            else:
+                ratings = generate_ratings(stories, client, prompt)
+                ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
             mark_job_completed("generate_ratings", run_id, conn)
         else:
             log.info("generate_ratings job already completed, loading from CSV.")
@@ -144,10 +150,9 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         save_results(results, run_id)
     
 
-
 def save_results(results: pd.DataFrame, run_id: str) -> None:
-    rating_coef = results.params['rating'] if 'rating' in results.params.index else results.params.iloc[1]
-    rating_pvalue = results.pvalues['rating'] if 'rating' in results.pvalues.index else results.pvalues.iloc[1]
+    rating_coef = results.params['content'] if 'content' in results.params.index else results.params.iloc[1]
+    rating_pvalue = results.pvalues['content'] if 'content' in results.pvalues.index else results.pvalues.iloc[1]
 
     result_row = {
         'run_id': run_id,
