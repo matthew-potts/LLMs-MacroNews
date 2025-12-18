@@ -34,7 +34,7 @@ def create_jsonl(df: pd.DataFrame, output_file: str) -> None:
     return
 
 def create_batches(
-        client: OpenAI,
+        client: LLMClient,
         input_batch_file: str,
         batch_size: int,
         out_dir: str = '../data/analysis/batches',
@@ -72,7 +72,7 @@ def create_batches(
         # Optionally upload the batch file to the Files API
 
         logger.info('Uploading %s', batch_path)
-        file_resp = client.files.create(
+        file_resp = client.client.files.create(
             file=open(batch_path, 'rb'),
             purpose='batch',
             expires_after={
@@ -112,7 +112,7 @@ def create_batches(
                 raise RuntimeError(f"Missing file_id for uploaded file: {next_entry}")
 
             logger.info('Creating batch for %s using file_id=%s', batch_file, file_id)
-            batch_resp = client.batches.create(
+            batch_resp = client.client.batches.create(
                 input_file_id=file_id,
                 endpoint=endpoint,
                 completion_window='24h'
@@ -140,7 +140,7 @@ def create_batches(
         to_remove = []
         for r in running:
             bid = r.get('batch_id')
-            status = client.batches.retrieve(bid).status
+            status = client.client.batches.retrieve(bid).status
             
             logger.info('Batch %s status=%s', bid, status)
             if status in ('completed', 'failed') or status == 'succeeded':  
@@ -173,14 +173,14 @@ def write_results_from_batches(results, output_jsonl_path, client: OpenAI) -> No
     for entry in results:
         batch_id = entry.get('batch_id')
 
-        batch_info = client.batches.retrieve(batch_id)
+        batch_info = client.client.batches.retrieve(batch_id)
 
         # locate output file id (support different shapes)
         file_id = getattr(batch_info, 'output_file_id', None) or getattr(batch_info, 'output_file', None)
 
         logger.info('Downloading output file %s for batch %s', file_id, batch_id)
 
-        results = client.files.content(file_id)
+        results = client.client.files.content(file_id)
 
         with open(output_jsonl_path, 'a', encoding='utf-8') as outf:
             for raw in results.iter_lines():

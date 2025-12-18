@@ -1,10 +1,14 @@
 {
   "MODEL": "gpt-4o",
-  "GENERATE_INTERMEDIATE_SUMMARIES": true,
+  "GENERATE_INTERMEDIATE_SUMMARIES": false,
+  "USE_BATCHES": true,
   "MARKET_DATA_PERIOD_HOURS": 1,
   "MARKET_DATA_BATCH_SIZE": 100,
   "INTERVAL": "THIRTY_MINUTES",
   "DATABASE": "data/database/llms_macronews.db",
   "INDICES_CSV": "data/indices.csv",
-  "LOGGING_LEVEL": "DEBUG"
+  "LOGGING_LEVEL": "DEBUG",
+  "TOPIC": "FED",
+  "REFINE_SEARCH": true,
+  "SEARCH_COUNT": 100000
 }

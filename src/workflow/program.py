@@ -62,8 +62,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
     with open(f'data/prompt_scale.txt') as f:
         prompt = f.read()
 
-    #client = LLMClientFactory.create(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
-    client = OpenAI(api_key=os.getenv("OPEN_AI_SECRET_KEY"))
+    open_ai_client = LLMClientFactory.create(model=_CFG.get("MODEL", "gpt-4o"), instructions=prompt)
 
     cur = conn.cursor()
     cur.execute("SELECT start_date, end_date FROM Run WHERE run_id = ?", (run_id,))
@@ -128,10 +127,10 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         if not check_job_completed("generate_ratings", run_id, conn):
             stories.drop_duplicates(inplace=True)
             if _USE_BATCHES:
-                ratings = run_batch(stories, client)
+                ratings = run_batch(stories, open_ai_client)
                 ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
             else:
-                ratings = generate_ratings(stories, client, prompt)
+                ratings = generate_ratings(stories, open_ai_client, prompt)
                 ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
             mark_job_completed("generate_ratings", run_id, conn)
         else:
