@@ -127,7 +127,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         if not check_job_completed("generate_ratings", run_id, conn):
             stories.drop_duplicates(inplace=True)
             if _USE_BATCHES:
-                ratings = run_batch(stories, open_ai_client)
+                ratings = run_batch(stories, open_ai_client, file_dir)
                 ratings.to_csv(f'{file_dir}/ratings.csv', index=True)
             else:
                 ratings = generate_ratings(stories, open_ai_client, prompt)

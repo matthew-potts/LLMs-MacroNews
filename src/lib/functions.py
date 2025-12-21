@@ -79,10 +79,10 @@ def fetch_story_bodies(df: pd.DataFrame, batch_size: int = 50) -> pd.DataFrame:
         batch_data = []
         
         for idx, story_id in batch:
-            response = news.story.Definition(story_id=story_id).get_data()
-            if response is None:
-                continue
             try:
+                response = news.story.Definition(story_id=story_id).get_data()
+                if response is None:
+                    continue
                 body = response.data.raw['newsItem']['contentSet']['inlineData'][0]['$']
                 batch_data.append({
                     'timestamp': idx,
@@ -112,8 +112,10 @@ def get_stories(start: str, end: str, topic: Topic, refine_search: bool) -> pd.D
 
     topic_news['timestamp'] = topic_news.index
 
+    #top_news = fetch_headlines("TOPNWS", start, end, _COUNT)
     top_news = fetch_headlines("TOPNWS", start, end, _COUNT)
 
+    important_topic = topic_news[['headline', 'storyId', 'timestamp']]#pd.merge(topic_news[['headline', 'storyId', 'timestamp']], top_news[['storyId']], on="storyId")
     important_topic = pd.merge(topic_news[['headline', 'storyId', 'timestamp']], top_news[['storyId']], on="storyId")
 
     log.info(f'Found {len(important_topic)} important stories for topic {topic.value} between {start} and {end}.')
@@ -235,18 +237,18 @@ def get_market_data(df: pd.DataFrame, output_csv: str, batch_size: int) -> pd.Da
     return pd.read_csv(output_csv, parse_dates=['start', 'Timestamp'])
 
 @print_start
-def run_batch(df: pd.DataFrame, client: LLMClient) -> pd.DataFrame:
+def run_batch(df: pd.DataFrame, client: LLMClient, file_dir: str) -> pd.DataFrame:
     try:
-        create_jsonl(df, 'data/analysis/batches/input_batch.jsonl', client)
+        create_jsonl(df, f'{file_dir}/input_batch.jsonl', client)
     except Exception as e:
         print(f'Exception occurred while creating JSONL: {e}')
         return None
     try:
         results = create_batches(
             client=client,
-            input_batch_file='data/analysis/batches/input_batch.jsonl',
+            input_batch_file=f'{file_dir}/input_batch.jsonl',
             batch_size=50,
-            out_dir='data/analysis/batches',
+            out_dir=file_dir,
             endpoint='/v1/chat/completions',
             max_concurrent_batches=2
         )
@@ -254,9 +256,9 @@ def run_batch(df: pd.DataFrame, client: LLMClient) -> pd.DataFrame:
         print(f'Exception occurred while creating batches: {e}')
         return None
 
-    write_results_from_batches(results, 'data/analysis/batches/output_batch.jsonl', client)
+    write_results_from_batches(results, f'{file_dir}/output_batch.jsonl', client)
 
-    df_results = read_batch_outputs(outputs_dir='data/analysis/batches', glob_pattern='output_batch.jsonl')
+    df_results = read_batch_outputs(outputs_dir=file_dir, glob_pattern='output_batch.jsonl')
 
     return df_results
 

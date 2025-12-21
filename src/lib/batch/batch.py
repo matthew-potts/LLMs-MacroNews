@@ -182,9 +182,12 @@ def write_results_from_batches(results, output_jsonl_path, client: OpenAI) -> No
         file_id = getattr(batch_info, 'output_file_id', None) or getattr(batch_info, 'output_file', None)
 
         logger.info('Downloading output file %s for batch %s', file_id, batch_id)
-
-        results = client.client.files.content(file_id)
-
+        try: 
+            results = client.client.files.content(file_id)
+        except Exception as e:
+            logger.error('Error downloading output file %s for batch %s: %s', file_id, batch_id, e)
+            continue
+        
         with open(output_jsonl_path, 'a', encoding='utf-8') as outf:
             for raw in results.iter_lines():
                 line = (raw.decode('utf-8', errors='replace') if isinstance(raw, (bytes, bytearray)) else str(raw)).strip()
