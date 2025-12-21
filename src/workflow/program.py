@@ -136,7 +136,7 @@ def run(run_id: str, stage: Stage, conn: sqlite3.Connection):
         else:
             log.info("generate_ratings job already completed, loading from CSV.")
             ratings = pd.read_csv(f'{file_dir}/ratings.csv', header=0, parse_dates=['timestamp'])
-            ratings.dropna(subset=['rating'], inplace=True)
+            ratings.dropna(subset=['content'], inplace=True)
     else:
         ratings_csv = f'{file_dir}/ratings.csv'
         log.info(f'{Stage.generate_ratings.name} stage skipped. Loading ratings from {ratings_csv}.')
