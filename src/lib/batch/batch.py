@@ -11,20 +11,23 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-def create_jsonl(df: pd.DataFrame, output_file: str) -> None:
+def create_jsonl(df: pd.DataFrame, output_file: str, client: LLMClient) -> None:
 
     with open(f'data/prompt_scale.txt') as f:
         prompt = f.read()
 
-    def batch_row(story) -> str:
+    def batch_row(story, client: LLMClient) -> str:
         # Create batch_row object to transform to jsonl compatible with API
         body_escaped = json.dumps(story['body'])[1:-1]  # Remove outer quotes from all text fields
         headline_escaped = json.dumps(story['headline'])[1:-1]
         prompt_escaped = json.dumps(prompt)[1:-1]
-        
-        return f'{{"custom_id": "request-{story["storyId"]}.Timestamp-{str(story.name)}", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "gpt-5-mini", "messages": [{{"role": "system", "content": "{prompt_escaped}"}},{{"role": "user", "content": "{headline_escaped} {body_escaped}"}}],"max_tokens": 3000}}}}'
+
+        if client.model == "gpt-4o":
+            return f'{{"custom_id": "request-{story["storyId"]}.Timestamp-{str(story.name)}", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "gpt-4o", "messages": [{{"role": "system", "content": "{prompt_escaped}"}},{{"role": "user", "content": "{headline_escaped} {body_escaped}"}}],"max_tokens": 3000}}}}'
+        elif client.model == "gpt-5-mini":
+            return f'{{"custom_id": "request-{story["storyId"]}.Timestamp-{str(story.name)}", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "gpt-5-mini", "messages": [{{"role": "system", "content": "{prompt_escaped}"}},{{"role": "user", "content": "{headline_escaped} {body_escaped}"}}]}}}}'
     
-    df = df.apply(batch_row, axis=1)
+    df = df.apply(lambda story: batch_row(story, client), axis=1)
 
     # Convert to JSONL (one JSON object per line)
     with open(output_file, 'w') as f: # ../data/analysis/fed_top_news_stories_2025_batch_request.jsonl

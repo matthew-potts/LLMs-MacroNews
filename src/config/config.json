@@ -1,5 +1,5 @@
 {
-  "MODEL": "gpt-4o",
+  "MODEL": "gpt-5-mini",
   "GENERATE_INTERMEDIATE_SUMMARIES": false,
   "USE_BATCHES": true,
   "MARKET_DATA_PERIOD_HOURS": 1,

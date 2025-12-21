@@ -237,7 +237,7 @@ def get_market_data(df: pd.DataFrame, output_csv: str, batch_size: int) -> pd.Da
 @print_start
 def run_batch(df: pd.DataFrame, client: LLMClient) -> pd.DataFrame:
     try:
-        create_jsonl(df, 'data/analysis/batches/input_batch.jsonl')
+        create_jsonl(df, 'data/analysis/batches/input_batch.jsonl', client)
     except Exception as e:
         print(f'Exception occurred while creating JSONL: {e}')
         return None

@@ -9,8 +9,9 @@ class LLMClientFactory:
     # Registry of model names to client classes
     _MODEL_REGISTRY = {
         "gpt-4o": OpenAIClient,
-        "DeepSeek-R1-0528": NebiusClient,
-        "claude-sonnet-4-5-20250929": AnthropicClient,
+        "gpt-5-mini": OpenAIClient
+        # "DeepSeek-R1-0528": NebiusClient,
+        # "claude-sonnet-4-5-20250929": AnthropicClient,
     }
     
     @classmethod
