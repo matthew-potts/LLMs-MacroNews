@@ -1,8 +1,8 @@
 # LLMs-MacroNews
 
-Lightweight pipeline to fetch macro news, create batch LLM requests, submit and monitor batch jobs, collect outputs, and convert them into analysis-ready CSVs.
-
 This software was created to support the analysis in my recent research article on [LLM assessments of macroeconomic news and their relation to the Global Financial Cycle](https://www.crossbordercode.com/research/LLMsAndGFCy/LLMsAndGFCy.html).
+
+Fetches macro news, creates batch LLM requests, submits and monitors batch jobs, and converts outputs into analysis-ready CSVs.
 
 ---
 
