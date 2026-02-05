@@ -46,7 +46,7 @@ with open(_CONFIG_PATH, "r") as _cfg_f:
 _DATABASE = _CFG.get("DATABASE", "../../data/database/llms_macronews.db")
 _USE_BATCHES = _CFG.get("USE_BATCHES", True)
 _BATCH_SIZE = _CFG.get("MARKET_DATA_BATCH_SIZE", 10000)
-_INDICES_LIST = _CFG.get("COUNTRIES", "/Users/matthewpotts/Documents/Career/Projects/LLMs-MacroNews/data/indices_majors.csv")
+_INDICES_LIST = _CFG.get("COUNTRIES", "")
 _INDICES = pd.read_csv(f'{_INDICES_LIST}')
 _MARKET_DATA_PERIOD_HOURS = _CFG.get("MARKET_DATA_PERIOD_HOURS", 1)
 _TOPIC = _CFG.get("TOPIC", "U.S. Federal Reserve")
